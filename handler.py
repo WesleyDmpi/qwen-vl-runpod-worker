@@ -3,95 +3,114 @@ import torch
 from PIL import Image
 import requests
 from io import BytesIO
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 
-# --- Variabelen ---
 MODEL_ID = "HuggingFaceM4/SmolVLM-Llama-2.7b-Instruct"
 model = None
 processor = None
 
-# --- Initialisatie Functie ---
+torch.set_grad_enabled(False)
+
 def init():
-    """
-    Deze functie wordt één keer uitgevoerd wanneer de worker start.
-    Hier laden we het model in het geheugen van de GPU.
-    """
     global model, processor
-    
-    # Gebruik bfloat16 voor minder geheugengebruik en snellere inferentie
-    torch_dtype = torch.bfloat16
 
     try:
-        print(f"Model {MODEL_ID} aan het laden...")
+        print(f"[init] Loading processor/model: {MODEL_ID}")
         processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_ID,
-            torch_dtype=torch_dtype,
             trust_remote_code=True,
-            load_in_4bit=True # Gebruik 4-bit kwantisatie voor minder VRAM-gebruik
+            quantization_config=quant_config,
+            device_map="cuda",
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.bfloat16,
         )
-        print("Model succesvol geladen.")
+
+        model.eval()
+        print("[init] Model loaded.")
+        return {"status": "ok"}
     except Exception as e:
-        print(f"Fout bij het laden van het model: {e}")
-        # Zorg ervoor dat de worker stopt als het model niet kan laden
+        print(f"[init] Failed: {e}")
         return None
-    
-    return {"model": model, "processor": processor}
 
-# --- Handler Functie ---
+def _load_image_from_url(url: str) -> Image.Image:
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    return Image.open(BytesIO(r.content)).convert("RGB")
+
 def handler(job):
-    """
-    Deze functie wordt voor elke API-request uitgevoerd.
-    Het 'job' object bevat de input van de gebruiker.
-    """
     global model, processor
-
     if model is None or processor is None:
-        return {"error": "Model is niet geïnitialiseerd."}
+        return {"error": "Model not initialized."}
 
-    job_input = job.get('input', {})
-    
-    # Input valideren
-    image_url = job_input.get('image_url')
-    prompt_text = job_input.get('prompt', "Describe this image in detail.")
+    inp = (job or {}).get("input", {}) or {}
+    image_url = inp.get("image_url")
+    prompt_text = inp.get("prompt", "Describe this image in detail.")
+    max_new_tokens = int(inp.get("max_new_tokens", 192))
 
     if not image_url:
-        return {"error": "Parameter 'image_url' is verplicht."}
+        return {"error": "Missing required parameter: 'image_url'."}
 
     try:
-        # Download en open de afbeelding van de URL
-        response = requests.get(image_url)
-        response.raise_for_status() # Geeft een error bij slechte statuscodes
-        image = Image.open(BytesIO(response.content)).convert('RGB')
+        image = _load_image_from_url(image_url)
     except Exception as e:
-        return {"error": f"Kon afbeelding niet downloaden of openen: {e}"}
+        return {"error": f"Failed to load image: {e}"}
 
-    # Formatteer de prompt zoals het model het verwacht
-    # Dit is CRUCIAAL voor goede resultaten!
-    prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<image>\n{prompt_text}<|im_end|>\n<|im_start|>assistant\n"
+    # Gebruik de officiële chat-template + multimodal schema
+    # Let op: veel SmolVLM builds verwachten [{"type":"image"}, {"type":"text", ...}]
+    messages = [
+        {"role": "system", "content": "You are a helpful vision assistant."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt_text},
+            ],
+        },
+    ]
 
     try:
-        # Verwerk de input
-        inputs = processor(prompt, image, return_tensors="pt").to("cuda", dtype=torch.bfloat16)
-
-        # Genereer de output
-        output = model.generate(
-            **inputs,
-            max_new_tokens=256,
-            do_sample=False, # Zet op True voor meer creatieve antwoorden
-            num_beams=1,
+        text = processor.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False
         )
-        
-        # Decodeer de gegenereerde tekst
-        generated_text = processor.batch_decode(output, skip_special_tokens=True)[0]
-        
-        # Maak de output schoon (verwijder de input prompt)
-        clean_output = generated_text.split('<|im_start|>assistant\n')[-1].strip()
 
-        return {"description": clean_output}
+        inputs = processor(
+            text=[text],
+            images=[image],
+            return_tensors="pt",
+        )
+
+        # Stuur tensors naar GPU en juiste dtype
+        inputs = {k: (v.to("cuda", dtype=torch.bfloat16) if hasattr(v, "to") else v)
+                  for k, v in inputs.items()}
+
+        gen_out = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+            pad_token_id=processor.tokenizer.eos_token_id,
+        )
+
+        # Enkel nieuwe tokens decoderen (na de prompt)
+        input_len = inputs["input_ids"].shape[-1]
+        new_tokens = gen_out[0, input_len:]
+        text_out = processor.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+        return {
+            "description": text_out,
+            "tokens_generated": int(new_tokens.shape[-1]),
+        }
 
     except Exception as e:
-        return {"error": f"Fout tijdens de inferentie: {e}"}
+        return {"error": f"Inference error: {e}"}
 
-# Start de RunPod serverless worker
 runpod.serverless.start({"handler": handler, "init": init})
