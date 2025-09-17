@@ -1,20 +1,14 @@
 FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
 
-# Zet de werkdirectory
 WORKDIR /app
 
-# --- NIEUWE REGELS HIERONDER ---
-# Update de package list en installeer git.
-# Dit is nodig omdat sommige pip packages git gebruiken.
 RUN apt-get update && apt-get install -y git
-# -----------------------------
 
-# Kopieer de requirements en installeer ze
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# --- AANGEPASTE REGEL HIERONDER ---
+# Installeer packages en gebruik --pre om de nieuwste dev-versie van transformers te krijgen
+RUN pip install --upgrade pip && pip install --pre -r requirements.txt
 
-# Kopieer de rest van de applicatiecode
 COPY . .
 
-# Specificeer het commando om de applicatie te starten
 CMD ["python3", "-u", "app.py"]
