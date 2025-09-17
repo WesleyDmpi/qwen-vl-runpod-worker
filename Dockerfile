@@ -19,4 +19,4 @@ RUN pip install --upgrade pip setuptools wheel && \
 COPY handler.py .
 
 # Start de RunPod serverless worker
-CMD ["python", "-m", "runpod.serverless"]
+CMD ["python", "handler.py"]
