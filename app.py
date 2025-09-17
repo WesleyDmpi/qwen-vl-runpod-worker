@@ -6,19 +6,18 @@ import base64
 import io
 import requests
 
-# --- Aangepast Model laden ---
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# --- Model laden ---
 model_id = "microsoft/Phi-3-vision-128k-instruct"
 
-print(f"Starting model initialization for {model_id} on device {device}...")
+print(f"Starting model initialization for {model_id} with 4-bit quantization...")
 
-# Laad het model eerst op de CPU
+# Laad het model in 4-bit om geheugen te besparen
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
     trust_remote_code=True,
-    torch_dtype="auto"
-).to(device).eval() # Stuur het model daarna in zijn geheel naar de GPU en zet in evaluatie-modus
-
+    load_in_4bit=True, # DEZE REGEL IS DE MAGIE
+    device_map="auto"   # Met kwantisatie is device_map weer de beste methode
+)
 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
 print("Model initialization complete.")
@@ -28,6 +27,7 @@ def handler(job):
     prompt = job_input.get('prompt', 'Describe what is in this image.')
 
     try:
+        # Afbeelding logica (blijft hetzelfde)
         if 'image_url' in job_input:
             url = job_input['image_url']
             response = requests.get(url, stream=True)
@@ -44,16 +44,15 @@ def handler(job):
         ]
 
         prompt_text = processor.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        # Stuur de inputs ook expliciet naar hetzelfde device als het model
-        inputs = processor(prompt_text, [image], return_tensors="pt").to(device)
+        # De inputs moeten naar het device waar het model is
+        inputs = processor(prompt_text, [image], return_tensors="pt").to(model.device)
 
         generation_args = {
             "max_new_tokens": job_input.get('max_new_tokens', 1024),
             "temperature": 0.0,
             "do_sample": False,
         }
-
-        # Voer de generatie uit binnen een no_grad blok voor efficiëntie
+        
         with torch.no_grad():
             generate_ids = model.generate(**inputs, eos_token_id=processor.tokenizer.eos_token_id, **generation_args)
 
@@ -63,7 +62,6 @@ def handler(job):
         return {"result": response_text.strip()}
 
     except Exception as e:
-        # Voeg de traceback toe voor betere debugging
         import traceback
         return {"error": f"Er is een fout opgetreden: {str(e)}", "traceback": traceback.format_exc()}
 
