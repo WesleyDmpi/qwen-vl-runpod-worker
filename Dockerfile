@@ -1,10 +1,18 @@
-# DEZE REGEL IS VERANDERD naar een oudere, stabielere PyTorch/CUDA versie
-FROM runpod/pytorch:2.1.2-py3.10-cuda11.8.0-devel-ubuntu22.04
+FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 WORKDIR /app
 
+# Installeer git
+RUN apt-get update && apt-get install -y git
+
+# Kopieer de requirements
 COPY requirements.txt .
+
+# Installeer de packages via requirements.txt
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
+# Kopieer de applicatiecode
 COPY app.py .
+
+# Start de applicatie
 CMD ["python3", "-u", "app.py"]
