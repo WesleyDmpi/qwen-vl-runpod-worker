@@ -1,8 +1,8 @@
 runpod
-torch
+transformers>=4.45.0
+accelerate>=0.33.0
 pillow
-accelerate
-einops
-sentencepiece
 requests
-transformers==4.41.2
+safetensors
+sentencepiece
+einops
