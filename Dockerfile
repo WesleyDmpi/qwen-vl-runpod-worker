@@ -1,18 +1,14 @@
-FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
+FROM runpod/serverless:gpu
+
+ENV PYTHONUNBUFFERED=1 \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    TRANSFORMERS_CACHE=/root/.cache/huggingface
 
 WORKDIR /app
+RUN python -m pip install --upgrade pip
 
-# Installeer git
-RUN apt-get update && apt-get install -y git
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Kopieer de requirements
-COPY requirements.txt .
-
-# Installeer de packages via requirements.txt
-RUN pip install --upgrade pip && pip install -r requirements.txt
-
-# Kopieer de applicatiecode
-COPY app.py .
-
-# Start de applicatie
-CMD ["python3", "-u", "app.py"]
+COPY . /app
+CMD ["python", "-u", "app.py"]
