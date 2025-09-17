@@ -5,4 +5,4 @@ accelerate
 einops
 sentencepiece
 requests
-git+https://github.com/huggingface/transformers.git
+transformers
