@@ -1,13 +1,22 @@
-FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
+# ✅ Serverless base-image van RunPod (GPU + serverless runtime)
+FROM runpod/serverless:gpu
+
+# Snellere, duidelijke logs
+ENV PYTHONUNBUFFERED=1 \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    TRANSFORMERS_CACHE=/root/.cache/huggingface
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y git
+# Up-to-date pip
+RUN python -m pip install --upgrade pip
 
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# Dependencies
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Kopieer alleen de app.py
-COPY app.py .
+# Code
+COPY . /app
 
-CMD ["python3", "-u", "app.py"]
+# Start je serverless handler (app.py roept runpod.serverless.start(...) aan)
+CMD ["python", "-u", "app.py"]
