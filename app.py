@@ -1,65 +1,55 @@
 import runpod
 import torch
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import base64
 import io
 import requests
 
 # --- Model laden ---
-model_id = "microsoft/Phi-3-vision-128k-instruct"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+model_id = "vikhyatk/moondream2"
 
-print(f"Starting model initialization for {model_id} with 4-bit quantization...")
-
-# Laad het model in 4-bit om geheugen te besparen
+print(f"Starting model initialization for {model_id}...")
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
     trust_remote_code=True,
-    load_in_4bit=True, # DEZE REGEL IS DE MAGIE
-    device_map="auto"   # Met kwantisatie is device_map weer de beste methode
-)
-processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    torch_dtype=torch_dtype,
+    revision="2024-05-20" # Gebruik een vaste, stabiele versie
+).to(device)
 
+tokenizer = AutoTokenizer.from_pretrained(model_id, revision="2024-05-20")
 print("Model initialization complete.")
 
 def handler(job):
     job_input = job['input']
-    prompt = job_input.get('prompt', 'Describe what is in this image.')
+    prompt = job_input.get('prompt', 'Describe this image in detail.')
 
     try:
-        # Afbeelding logica (blijft hetzelfde)
+        # Afbeelding logica
         if 'image_url' in job_input:
             url = job_input['image_url']
             response = requests.get(url, stream=True)
             response.raise_for_status()
             image = Image.open(response.raw).convert("RGB")
-        elif 'image_base64' in job_input:
-            image_data = base64.b64decode(job_input['image_base64'])
+        elif 'image_base_64' in job_input: # Let op: ik heb hier image_base64 gecorrigeerd
+            image_data = base64.b64decode(job_input['image_base_64'])
             image = Image.open(io.BytesIO(image_data)).convert("RGB")
         else:
-            return {"error": "Input moet ofwel 'image_url' of 'image_base64' bevatten."}
+            return {"error": "Input moet ofwel 'image_url' of 'image_base_64' bevatten."}
 
-        messages = [
-            {"role": "user", "content": f"<|image_1|>\n{prompt}"},
-        ]
-
-        prompt_text = processor.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        # De inputs moeten naar het device waar het model is
-        inputs = processor(prompt_text, [image], return_tensors="pt").to(model.device)
-
-        generation_args = {
-            "max_new_tokens": job_input.get('max_new_tokens', 1024),
-            "temperature": 0.0,
-            "do_sample": False,
-        }
+        # Moondream2's specifieke manier om de afbeelding en prompt te verwerken
+        enc_image = model.encode_image(image)
         
-        with torch.no_grad():
-            generate_ids = model.generate(**inputs, eos_token_id=processor.tokenizer.eos_token_id, **generation_args)
+        # Voer de inferentie uit
+        answer = model.answer_question(
+            enc_image,
+            prompt,
+            tokenizer
+        )
 
-        generate_ids = generate_ids[:, inputs['input_ids'].shape[1]:]
-        response_text = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-
-        return {"result": response_text.strip()}
+        return {"result": answer}
 
     except Exception as e:
         import traceback
