@@ -1,4 +1,5 @@
-FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
+# DEZE REGEL IS VERANDERD naar een oudere, stabielere PyTorch/CUDA versie
+FROM runpod/pytorch:2.1.2-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 WORKDIR /app
 
