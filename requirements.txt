@@ -1,8 +1,8 @@
 runpod
 torch
-transformers
 pillow
 accelerate
 einops
 sentencepiece
 requests
+git+https://github.com/huggingface/transformers.git
