@@ -1,85 +1,70 @@
-import os, io, json, re, requests
-from PIL import Image
+import runpod
 import torch
-from transformers import AutoProcessor, AutoModelForCausalLM
+from PIL import Image
+from transformers import AutoModelForCausalLM, AutoProcessor
+import base64
+import io
+import requests
 
-try:
-    import runpod
-except Exception:
-    runpod = None
+# --- Model laden ---
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model_id = "microsoft/Phi-3-vision-128k-instruct"
 
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2-VL-2B-Instruct")
-HF_TOKEN   = os.getenv("HF_TOKEN", None)
-
-dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-# --- load once ---
-processor = AutoProcessor.from_pretrained(
-    MODEL_NAME, trust_remote_code=True, use_auth_token=HF_TOKEN
-)
+print(f"Starting model initialization for {model_id}...")
+# Gebruik device_map="auto" om automatisch de GPU te gebruiken
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    torch_dtype=dtype,
+    model_id,
     device_map="auto",
     trust_remote_code=True,
-    use_auth_token=HF_TOKEN
-).eval()
+    torch_dtype="auto" # Laat accelerate de beste precisie kiezen
+)
+processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+print("Model initialization complete.")
 
-def _load_image(inp):
-    if "image_url" in inp and inp["image_url"]:
-        r = requests.get(inp["image_url"], timeout=20)
-        r.raise_for_status()
-        return Image.open(io.BytesIO(r.content)).convert("RGB")
-    if "image_base64" in inp and inp["image_base64"]:
-        b64 = inp["image_base64"]
-        if b64.startswith("data:"):
-            b64 = b64.split(",", 1)[-1]
-        import base64
-        raw = base64.b64decode(b64)
-        return Image.open(io.BytesIO(raw)).convert("RGB")
-    raise ValueError("Provide image_url or image_base64")
+def handler(job):
+    job_input = job['input']
+    prompt = job_input.get('prompt', 'Describe what is in this image.')
 
-def _extract_json(txt):
-    m = re.search(r'\{.*\}', txt, flags=re.S)
-    if not m:
-        raise ValueError("No JSON object in model output")
-    return json.loads(m.group(0))
-
-def predict(inp):
-    prompt = inp.get("prompt") or "Return STRICT JSON with keys: caption, detected_objects, colors, nsfw. No prose."
-    max_new = int(inp.get("max_new_tokens", 200))
-
-    img = _load_image(inp)
-    messages = [
-        {"role": "system", "content": "Return STRICT JSON with keys: caption, detected_objects, colors, nsfw. No prose, no markdown."},
-        {"role": "user", "content": [
-            {"type": "image", "image": img},
-            {"type": "text", "text": prompt}
-        ]}
-    ]
-
-    chat = processor.apply_chat_template(messages, add_generation_prompt=True)
-    inputs = processor(text=[chat], images=[img], return_tensors="pt").to(model.device)
-
-    with torch.no_grad():
-        out_ids = model.generate(**inputs, do_sample=False, temperature=0.0, max_new_tokens=max_new)
-
-    out_text = processor.batch_decode(out_ids, skip_special_tokens=True)[0]
     try:
-        data = _extract_json(out_text)
-    except Exception:
-        data = {"caption": out_text.strip()[:300], "detected_objects": [], "colors": [], "nsfw": False}
+        # Afbeelding logica (blijft hetzelfde)
+        if 'image_url' in job_input:
+            url = job_input['image_url']
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            image = Image.open(response.raw).convert("RGB")
+        elif 'image_base64' in job_input:
+            image_data = base64.b64decode(job_input['image_base64'])
+            image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        else:
+            return {"error": "Input moet ofwel 'image_url' of 'image_base64' bevatten."}
 
-    # ensure keys
-    data.setdefault("caption",""); data.setdefault("detected_objects",[])
-    data.setdefault("colors",[]);  data.setdefault("nsfw",False)
-    return {"output": data}
+        # Phi-3 Vision gebruikt een specifieke chat-template
+        messages = [
+            {"role": "user", "content": f"<|image_1|>\n{prompt}"},
+        ]
 
-def handler(event):
-    try:
-        return predict(event.get("input", {}))
+        # Verwerk de prompt en de afbeelding
+        prompt_text = processor.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(prompt_text, [image], return_tensors="pt").to(device)
+
+        # Genereer de output
+        generation_args = {
+            "max_new_tokens": job_input.get('max_new_tokens', 1024),
+            "temperature": 0.0,
+            "do_sample": False,
+        }
+
+        generate_ids = model.generate(**inputs, eos_token_id=processor.tokenizer.eos_token_id, **generation_args)
+
+        # Verwijder de input tokens uit de output en decodeer
+        generate_ids = generate_ids[:, inputs['input_ids'].shape[1]:]
+        response_text = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+
+        return {"result": response_text.strip()}
+
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Er is een fout opgetreden: {str(e)}"}
 
-if runpod is not None:
+# Start de Runpod handler
+if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
